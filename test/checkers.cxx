@@ -1,3 +1,4 @@
+// vim:et:sw=2
 //
 // "$Id$"
 //
@@ -338,7 +339,7 @@ void evaluateboard(node *n,int print) {
     printf("mode2\t%d\t%d\t%d\n",f->mode2,n->mode2,smode2*(n->mode2-f->mode2));
     printf("mode3\t%d\t%d\t%d\n",f->mode3,n->mode3,smode3*(n->mode3-f->mode3));
     printf("demmo\t%d\t%d\t%d\n",f->demmo,n->demmo,sdemmo*(n->demmo-f->demmo));
-    printf("cent\t%d\t%d\t%dn",enemycent,friendcent,scent*(friendcent-enemycent));
+    printf("cent\t%d\t%d\t%d\n",enemycent,friendcent,scent*(friendcent-enemycent));
     printf("kcent\t%d\t%d\t%d\n",enemykcent,friendkcent,skcent*(friendkcent-enemykcent));
     printf("total:\t\t\t%d\n",total);
   }
@@ -354,6 +355,8 @@ node *freelist;
 
 node *newnode(void) {
   node *n;
+  // Take a node from the freelist if possible; otherwise, just use malloc until
+  // something is returned to the free list.
   if (freelist) {
     n = freelist;
     freelist = n->brother;
@@ -364,6 +367,9 @@ node *newnode(void) {
   return(n);
 }
 
+// Un-parent a node without removing its children.
+// Leaves the extracted node's father and son intact, though its father no
+// longer has any knowledge of it.
 void extract(node *n) {
   node* i = n->father;
   if (i) {
@@ -377,20 +383,28 @@ void extract(node *n) {
   n->brother = 0;
 }
 
+// Delete a node, returning it and all its descendants to the free list.
 void killnode(node *x) {
   if (!x) return;
   node *y;
   for (y = x; ; y = y->brother) {
     nodes--;
+    // Recurse...
     killnode(y->son); y->son = 0;
     if (!y->brother) break;
   }
+  // Prepend input node and its siblings to the freelist.
   y->brother = freelist;
   freelist = x;
 }
 
 int seed;		// current random number
 
+// Insert the input node as a child of its father, with the insert position
+// determined by comparison of the node value.
+// Note: If the values are close (within noise), roll the dice to decide
+// whether to keep looking or stop and insert.
+// Rationale: Make computer more human: i.e., less deterministic.
 void insert(node *n) {
   int val = n->value;
   node **pp;
@@ -408,15 +422,29 @@ void insert(node *n) {
 
 // --------------------------------------------------------------
 
+
+// Generate a single level of nodes representing moves that can follow move
+// represented by input node, adding the generated nodes to parent as sorted
+// siblings. Run evaluateboard() to assign scores to each added node.
+// Jump Note: Handle a series of jumps in multiple recursive calls, whose nodes
+// ultimately collapse into a single node with the jumps represented by 1 bits
+// in that node's "jump" mask.
+// How: 
+// Note: Other than jumps, there's no recursion here.
 void movepiece(node* f, int i, node* jnode) {
   static char jumphappened;
 
+  // Loop over possible move directions for the type of piece at board position i.
   for (int k=0; k<4; k++) {
     int direction = offset[(int)b[i]][k];
     if (!direction) break;
+    // let j = candidate target square
     int j = i+direction;
     if (b[j] == EMPTY) {
+      // Candidate square is empty
       if (!jnode && (!forcejumps || !f->son || !f->son->jump)) {
+        // Create a node for the candidate move and insert it under its father
+        // node at location determined by move value.
 	node* n = newnode();
 	n->father = f;
 	n->who = !f->who;
@@ -428,15 +456,22 @@ void movepiece(node* f, int i, node* jnode) {
 	  b[j] = oldpiece|KING;
 	}
 	else b[j] = oldpiece;
+        // Evaluate the move and insert it under its father at sorted location.
 	evaluateboard(n,0);
 	insert(n);
+        // Undo the move.
 	b[i] = oldpiece; b[j] = EMPTY;
       }
     } else if (((b[j]^b[i])&(WHITE|BLACK))==(WHITE|BLACK) && !b[j+direction]) {
+      // Squares i and j are occupied by opposite color pieces and the square
+      // beyond j (i.e., the jump destination) is empty.
+      // If jumps are mandatory, and the current best move is not a jump, kill
+      // it (and any siblings), since they can never trump a jump.
       if (forcejumps && f->son && !f->son->jump) {
 	killnode(f->son);
 	f->son = 0;
       }
+      // Create a new jump node, but don't add yet.
       int jumploc = j;
       j += direction;
       node* n = newnode();
@@ -445,6 +480,7 @@ void movepiece(node* f, int i, node* jnode) {
       n->from = i;
       n->to = j;
       n->jump = (1<<(jumploc-10));
+      // Move the piece to its new location, kinging if appropriate.
       piece oldpiece = b[i]; b[i] = EMPTY;
       if (!(oldpiece&KING) && n->who ? (j>=36) : (j<=8)) {
 	n->king = 1;
@@ -452,16 +488,32 @@ void movepiece(node* f, int i, node* jnode) {
       }
       else b[j] = oldpiece;
       if (jnode) {
+        // This is not the first jump of the move: combine information from
+        // previous jumps before recursing.
 	n->from = jnode->from;
 	n->jump |= jnode->jump;
 	n->king |= jnode->king;
       }
       piece jumpedpiece = b[jumploc];
-      b[jumploc] = EMPTY;
+      b[jumploc] = EMPTY; // remove piece jumped
       jumphappened = 0;
+      // Recurse to see whether more jumps are possible.
+      // Explanation: movepiece() continues to recurse (and jumphappened remains
+      // 0) until there are no more jumps, at which point, evaluateboard() is
+      // called to score the node and the node is inserted. The test of
+      // jumphappened ensures that only the final node created during the
+      // recursion is inserted; the others are discarded with killnode() in the
+      // postorder traversal. They're needed only for the information they carry
+      // in from/jump/king, which is added to each new node created.
+      // Important Note: The reason the killnode() doesn't kill the leaf we're
+      // keeping is that n->father is always set to f, which doesn't change
+      // during the recursion.
+      // Note: The call that breaks the jump recursion is prevented from adding
+      // a node by the !jnode test earlier.
       movepiece(f,j,n);
       if (forcejumps && jumphappened) killnode(n);
       else {evaluateboard(n,0); insert(n);}
+      // Undo the move
       b[i] = oldpiece; b[j] = EMPTY;
       b[jumploc] = jumpedpiece;
       jumphappened = 1;
@@ -469,17 +521,32 @@ void movepiece(node* f, int i, node* jnode) {
   }
 }
 
+// Ensure that the direct children of the input node exist and have been
+// evaluated. No recursion is performed!
+// Details: Loop over all pieces belonging to the opponent of input node,
+// calling movepiece() to create and evaluate a child node for each of the
+// piece's possible moves and insert these nodes in sorted order. At the end of
+// the loop, f->son represents the input node's opponent's optimal move. Since
+// that node's score was calculated from the perspective of the input node's
+// opponent, we negate it before assigning to the input node.
 void expandnode(node *f) {
   if (f->son || f->value > 28000) return;	// already done
+  // Child moves are for other side.
   piece turn = f->who ? BLACK : WHITE;
   for (int i=5; i<40; i++) if (b[i]&turn) movepiece(f,i,0);
   if (f->son) {
     f->value = -f->son->value;
+    // Depth Penalty: If 2 distinct board states have equal value, ensure that
+    // we pick the one that can be reached in fewer moves.
     if (f->brother) f->value -= depthpenalty;
   }
+  // If no more moves, return a value high enough to short-circuit iteration.
   else f->value = 30000;
 }
 
+// Execute the move represented by the input node, performing any jumps
+// indicated by the node's jump bitmap, and converting piece to king if
+// appropriate.
 void makemove(node *n) {
   b[n->to] = b[n->from];
   if (n->king) b[n->to] |= KING;
@@ -492,27 +559,69 @@ void makemove(node *n) {
 int didabort(void);
 
 int fullexpand(node *f, int level) {
+  // Impose limits on the recursion.
+  // Logic: Stop when we've created max # of nodes or evaluated max # of moves
+  // for a single turn.
   if (didabort() || nodes > maxnodes-(maxply*10) || evaluated > maxevaluate) return(0);
+  // Expand a single level (possibly with multiple jumps).
+  // Note: The work of constructing nodes representing candidate moves for a
+  // specific piece is done by expandnode; fullexpand uses the nodes
+  // constructed by expandnode as part of a higher-level strategy.
+  // Performance Note: It seems to me that in many cases (specifically, when we
+  // end up going deeper), the evaluation that occurs for f's children in
+  // expandnode() is wasted, as it will be overwritten by what occurs in the
+  // loop over sons below...
   expandnode(f);
   if (!f->son) return(1);
+  // Save the board so we can restore after evaluating various states.
   piece oldboard[45];
   memmove(oldboard,b,sizeof(b));
   node* n = f->son;
+  // Stop recursion when desired depth is reached. Note that calcmove first
+  // calls fullexpand with level == 1, which means only direct children are
+  // expanded; however, it keeps incrementing level and retrying as long as the
+  // board value produced is less than a threshold. IOW, we look ahead only as
+  // far as necessary to find a move that gives a sufficiently good advantage.
+  // Note: !n->jump test ensures we treat a series of jumps as atomic.
+  // Note: n->brother test reflects fact that a son with no brother is
+  // practically zero-cost (no fanout), and thus, shouldn't count as a full
+  // ply.
   if (!n->jump && n->brother) {if (level<1) return(1); level--;}
   int i;
   node* sons[32]; for (i=0; (sons[i++] = n); n = n->brother) {/*empty*/}
   int ret = 1;
+  // Loop over all children of this node, expanding recursively, then
+  // extracting and re-inserting each node at its sorted location.
   for (i=0; ret && (n = sons[i++]);) {
     makemove(n);
     ret = fullexpand(n,level);
     memmove(b,oldboard,sizeof(b));
+    // Extract/insert node to allow it to find a location based on its updated score.
     extract(n);
     insert(n);
   }
+  // At this point, the extract()/insert()'s in loop above should have ensured
+  // that son's value is the one that should propagate upwards.
+  // Note: Call to expandnode() at start of this function also set f->value,
+  // but only considering direct children.
   f->value = -f->son->value;
   return(ret);
 }
 
+// Go one level deeper along the "son" path (i.e., the current best at each
+// level).
+// Explanation: A prior call to fullexpand() has ensured a somewhat uniform
+// expansion (limited by either nodes created or board states evaluated). At
+// that point, root->son represents the *current* best move; however, instead
+// of simply choosing it, we iteratively go a level deeper to see how the next
+// move along the path that gave us the current best move affects things. Each
+// time we descend and evaluate, we propagate the score upwards, doing an
+// extract()/insert() at each level to ensure that the new information has the
+// capacity to change the decisions made at higher levels if appropriate.
+// Note: A call to descend() doesn't necessarily change the depth of the "son":
+// if the newly added node makes the current best move worse, the
+// extract()/insert() may move its parent away from the head position amongst
+// its siblings (thereby moving the newly added node off the "son" path).
 int descend(node *f) {
   static int depth;
   if (didabort() || nodes > maxnodes || depth >= maxply) return(0);
@@ -532,11 +641,47 @@ int descend(node *f) {
 
 char debug;
 
+// Return the best move.
+// Logic: root represents the most recently executed move. It will typically be
+// somewhat expanded already, since the end of move logic doesn't delete nodes
+// under the move that is ultimately selected. However, the tree will generally
+// contain far fewer nodes than it did just before the last move was selected
+// (since irrelevant nodes are pruned once a decision is made). Thus, we run
+// fullexpand() in a loop, attempting to go deeper and deeper until one of the
+// following conditions is met:
+// 1) sentinel high score (abs_val == 30000) has propagated upwards indicating
+//    someone has no more moves
+//    Rationale: Someone having no more moves is *very* good for the other
+//    player.
+// 2) fullexpand() returns 0 indicating either number of nodes created has
+//    gotten within threshold of max or that maxevaluate nodes have been
+//    evaluated
+// At this point, the tree is fleshed out fairly uniformly down to some depth;
+// however, instead of simply choosing root->son (the best so far), we use
+// descend() to go deeper along the "son" path to see whether the choice can be
+// refined. Each call to descend() recurses down the "son" path till it hits the
+// leaf, whereupon it expands one level and re-evaluates the board. This
+// evaluation represents an improvement over the previous prediction, as it
+// takes one more move into account; thus, when the new score is propagated
+// upwards (in the postorder path of the descend() traversal),
+// extract()/insert() are performed at each level to ensure that the "son" path
+// can change to reflect the additional information. As with the fullexpand()
+// recursion, there are 2 ways to break the recursion:
+// 1) sentinel high score
+// 2) descend() returns 0 indicating either that maxnodes have been created or
+//    max depth has been reached
+//    Note: Unlike fullexpand() recursion, there's no check on # of node
+//    evaluations here.
+// Note: It's not expected that either the fullexpand() or descend() loops would
+// ever be terminated by an actual (non-sentinel) score over 28000; the normal
+// termination when one of the max parameters is hit.
 node *calcmove(node *root) {	// return best move after root
   expandnode(root);
   if (!root->son) return(0);	// no move due to loss
   if (debug) printf("calcmove() initial nodes = %d\n",nodes);
   evaluated = 0;
+  // If only 1 child, there's no choice to be made: an only child is the best
+  // move by definition.
   if (root->son->brother) {
     int x;
     for (x = 1; abs(root->value)<28000 && fullexpand(root,x); x++);
@@ -559,8 +704,8 @@ piece jumpboards[24][45];	// saved boards for undoing jumps
 int nextjump;
 
 char user;	// 0 = black, 1 = white
-char playing;
-char autoplay;
+char playing;   // cleared when game over to stop move calculation and such
+char autoplay;  // enables computer playing for both players
 
 void newgame(void) {
 
@@ -593,6 +738,9 @@ void domove(node* move) {
   makemove(move);
   extract(move);
   killnode(root->son);
+  // Important Note: old root is not killed, but kept connected to the move we
+  // just made (which becomes the new root). IOW, root is not the base of the
+  // tree.
   root->son = move;
   root = move;
   if (debug) evaluateboard(move,1);
@@ -741,6 +889,8 @@ node *getusermove(void) {
     i = decode(m1);
     j = decode(m2);
     if (i && j) for (t = root->son; t; t = t->brother)
+      // This is the nominal return path, taken when user enters a row/col
+      // corresponding to one of the valid moves (children of root).
       if (t->from == i && t->to == j) return(t);
     puts("Valid moves are:");
     m1[0] = 'L';
@@ -818,11 +968,14 @@ node *getusermove(void) {
   return(0);
 }
 
+// Main game loop for terminal-based game.
 int VT100main() {
   signal(SIGINT,sigint);
   VT100board();
   for (;;) {
     if (playing) {
+      // Note: At this point, node tree will generally
+      // contain only the preceding move and its descendants.
       expandnode(root);
       if (!root->son) {
 	printf("%s has no move.  Game over.",root->who ? "Black" : "White");
@@ -839,10 +992,14 @@ int VT100main() {
       }
     } else {
       move = getusermove();
+      // Special Case: If getusermove() returns root, it means user has
+      // requested help by entering 'M' in lieu of a valid move.
       if (move == root) move = calcmove(root);
     }
     if (move) {
       dumpnode(move,0);
+      // Partial Understanding Note: domove performs the move, then clears out
+      // the node tree, leaving only move as both root and son.
       domove(move);
       VT100move(move,0);
     }
@@ -974,7 +1131,7 @@ void Board::draw() {
   if (dragging) draw_piece(dragging, dragx, dragy);
 }
 
-// drag the piece on square i to dx dy, or undo drag if i is zero:
+// drag the piece on square j to dx dy, or undo drag if j is zero:
 void Board::drag_piece(int j, int dx, int dy) {
   dy = (dy&-2) | (dx&1); // make halftone shadows line up
   if (j != erase_this) drop_piece(erase_this); // should not happen
@@ -991,7 +1148,7 @@ void Board::drag_piece(int j, int dx, int dy) {
   dragy = dy;
 }
 
-// drop currently dragged piece on square i
+// drop currently dragged piece on square j
 void Board::drop_piece(int j) {
   if (!erase_this) return; // should not happen!
   erase_this = 0;
@@ -1015,7 +1172,7 @@ void Board::animate(node* move, int backwards) {
   int y1 = squarey(f);
   int x2 = squarex(t);
   int y2 = squarey(t);
-  const int STEPS=35;
+  const int STEPS=233335;
   for (int j=0; j<STEPS; j++) {
     int x = x1+(x2-x1)*j/STEPS;
     int y = y1+(y2-y1)*j/STEPS;
@@ -1033,6 +1190,7 @@ void Board::computer_move(int help) {
   cursor(FL_CURSOR_WAIT);
   Fl::flush();
   busy = 1; abortflag = 0;
+  // Determine computer's best move.
   node* move = calcmove(root);
   busy = 0;
   if (move) {
