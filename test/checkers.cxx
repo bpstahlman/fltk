@@ -217,8 +217,16 @@ void analyzemove(int direction,int src) {
   }
 }
 
+// Evaluate board for the user whose node is input, assigning the input node's
+// score to the node. If "print" arg is set, print detailed breakdown of
+// scoring components.
+// Precondition: Sequence of moves up to and including the input node has
+// already been applied to the board.
 void evaluateboard(node *n,int print) {
 
+  // Evaluate logic assumes current player is black; thus, if most recent move
+  // is actually white's, we must first "flip" the board (i.e., swap color of
+  // all pieces), swapping back when evaluation is complete.
   if (!n->who) tb = b;	// move was black's
   else {
     for (int i=0; i<45; i++) flipboard[44-i] = flip[(int)b[i]];
@@ -355,8 +363,12 @@ node *freelist;
 
 node *newnode(void) {
   node *n;
-  // Take a node from the freelist if possible; otherwise, just use malloc until
-  // something is returned to the free list.
+  // Take a node from the freelist if possible.
+  // Explanation: freelist starts out empty and is built dynamically as nodes
+  // are freed. Consider that the first computer move is likely to allocate
+  // several thousand nodes, most of which will be discarded at the end of the
+  // move; thus, over the course of a typical game, we will malloc only a small
+  // percentage of the total number of nodes required.
   if (freelist) {
     n = freelist;
     freelist = n->brother;
@@ -394,6 +406,7 @@ void killnode(node *x) {
     if (!y->brother) break;
   }
   // Prepend input node and its siblings to the freelist.
+  // See newnode() for details on freelist population.
   y->brother = freelist;
   freelist = x;
 }
@@ -404,7 +417,8 @@ int seed;		// current random number
 // determined by comparison of the node value.
 // Note: If the values are close (within noise), roll the dice to decide
 // whether to keep looking or stop and insert.
-// Rationale: Make computer more human: i.e., less deterministic.
+// Rationale: Make computer more human, thereby rendering the game less
+// deterministic.
 void insert(node *n) {
   int val = n->value;
   node **pp;
@@ -423,13 +437,12 @@ void insert(node *n) {
 // --------------------------------------------------------------
 
 
-// Generate a single level of nodes representing moves that can follow move
+// Generate a single level of nodes representing moves that can follow the move
 // represented by input node, adding the generated nodes to parent as sorted
 // siblings. Run evaluateboard() to assign scores to each added node.
 // Jump Note: Handle a series of jumps in multiple recursive calls, whose nodes
-// ultimately collapse into a single node with the jumps represented by 1 bits
-// in that node's "jump" mask.
-// How: 
+// ultimately collapse into a single node with the jumps represented by set
+// bits in that node's "jump" mask.
 // Note: Other than jumps, there's no recursion here.
 void movepiece(node* f, int i, node* jnode) {
   static char jumphappened;
@@ -439,12 +452,15 @@ void movepiece(node* f, int i, node* jnode) {
     int direction = offset[(int)b[i]][k];
     if (!direction) break;
     // let j = candidate target square
+    // Note: Off-board positions have value BLUE (and hence, will not be EMPTY).
     int j = i+direction;
     if (b[j] == EMPTY) {
       // Candidate square is empty
+      // Create a new node if we're not in the middle of a jump sequence (which
+      // an empty square would terminate) and the prospective node would not be
+      // sibling to a mandatory jump.
       if (!jnode && (!forcejumps || !f->son || !f->son->jump)) {
-        // Create a node for the candidate move and insert it under its father
-        // node at location determined by move value.
+        // Create a new node.
 	node* n = newnode();
 	n->father = f;
 	n->who = !f->who;
@@ -465,8 +481,8 @@ void movepiece(node* f, int i, node* jnode) {
     } else if (((b[j]^b[i])&(WHITE|BLACK))==(WHITE|BLACK) && !b[j+direction]) {
       // Squares i and j are occupied by opposite color pieces and the square
       // beyond j (i.e., the jump destination) is empty.
-      // If jumps are mandatory, and the current best move is not a jump, kill
-      // it (and any siblings), since they can never trump a jump.
+      // If jumps are mandatory and the current best move is not a jump, kill
+      // it (and any siblings), since it can never trump a jump.
       if (forcejumps && f->son && !f->son->jump) {
 	killnode(f->son);
 	f->son = 0;
@@ -524,14 +540,15 @@ void movepiece(node* f, int i, node* jnode) {
 // Ensure that the direct children of the input node exist and have been
 // evaluated. No recursion is performed!
 // Details: Loop over all pieces belonging to the opponent of input node,
-// calling movepiece() to create and evaluate a child node for each of the
-// piece's possible moves and insert these nodes in sorted order. At the end of
-// the loop, f->son represents the input node's opponent's optimal move. Since
-// that node's score was calculated from the perspective of the input node's
-// opponent, we negate it before assigning to the input node.
+// calling movepiece() for each. The job of movepiece() is to create and
+// evaluate a child node for each of the piece's possible moves and insert
+// these nodes in sorted order. At the end of the loop, f->son represents the
+// input node's opponent's optimal move. Since that node's score was calculated
+// from the perspective of the input node's opponent, we negate it before
+// assigning to the input node.
 void expandnode(node *f) {
   if (f->son || f->value > 28000) return;	// already done
-  // Child moves are for other side.
+  // Child moves are for input node's opponent.
   piece turn = f->who ? BLACK : WHITE;
   for (int i=5; i<40; i++) if (b[i]&turn) movepiece(f,i,0);
   if (f->son) {
@@ -551,6 +568,7 @@ void makemove(node *n) {
   b[n->to] = b[n->from];
   if (n->king) b[n->to] |= KING;
   b[n->from] = EMPTY;
+  // Remove any jumped pieces.
   if (n->jump) for(int i=0; i<32; i++) {
     if (n->jump & (1<<i)) b[10+i] = EMPTY;
   }
@@ -558,6 +576,9 @@ void makemove(node *n) {
 
 int didabort(void);
 
+// Expand the input node recursevely down to depth indicated by "level",
+// allowing scores calculated for leaf nodes to propagate upwards in postorder
+// traversal return path.
 int fullexpand(node *f, int level) {
   // Impose limits on the recursion.
   // Logic: Stop when we've created max # of nodes or evaluated max # of moves
@@ -593,17 +614,23 @@ int fullexpand(node *f, int level) {
   // Loop over all children of this node, expanding recursively, then
   // extracting and re-inserting each node at its sorted location.
   for (i=0; ret && (n = sons[i++]);) {
+    // Make move (temporarily), to be restored after recursive expansion.
+    // Note: This is rather inefficient: the memmove() copies entire board, but
+    // because it occurs at every level, each copy undoes only a single move.
     makemove(n);
     ret = fullexpand(n,level);
     memmove(b,oldboard,sizeof(b));
-    // Extract/insert node to allow it to find a location based on its updated score.
+    // Extract/insert node to allow it to find a location determined by its
+    // updated score.
     extract(n);
     insert(n);
   }
-  // At this point, the extract()/insert()'s in loop above should have ensured
-  // that son's value is the one that should propagate upwards.
+  // At this point, the extract()/insert()'s in loop above has ensured that
+  // son's value is the one that will propagate upwards.
   // Note: Call to expandnode() at start of this function also set f->value,
   // but only considering direct children.
+  // Note: I don't like the duplication: it seems to me the recursion could be
+  // done more intelligently.
   f->value = -f->son->value;
   return(ret);
 }
@@ -647,8 +674,9 @@ char debug;
 // under the move that is ultimately selected. However, the tree will generally
 // contain far fewer nodes than it did just before the last move was selected
 // (since irrelevant nodes are pruned once a decision is made). Thus, we run
-// fullexpand() in a loop, attempting to go deeper and deeper until one of the
-// following conditions is met:
+// fullexpand() in a loop, attempting to go deeper and deeper (albeit in a
+// uniform fashion, unlike recurse()) until one of the following conditions is
+// met:
 // 1) sentinel high score (abs_val == 30000) has propagated upwards indicating
 //    someone has no more moves
 //    Rationale: Someone having no more moves is *very* good for the other
@@ -673,8 +701,8 @@ char debug;
 //    Note: Unlike fullexpand() recursion, there's no check on # of node
 //    evaluations here.
 // Note: It's not expected that either the fullexpand() or descend() loops would
-// ever be terminated by an actual (non-sentinel) score over 28000; the normal
-// termination when one of the max parameters is hit.
+// ever be terminated by an actual (non-sentinel) score over 28000; termination
+// typically occurs because one of the max parameters has been hit.
 node *calcmove(node *root) {	// return best move after root
   expandnode(root);
   if (!root->son) return(0);	// no move due to loss
@@ -710,6 +738,9 @@ char autoplay;  // enables computer playing for both players
 void newgame(void) {
 
   int n;
+  // Set the initial state of each square: BLACK, WHITE, or...
+  // BLUE:  invalid border position
+  // EMPTY: valid empty square
   for (n=0; n<5; n++) b[n] = BLUE;
   for (n=5; n<18; n++) b[n] = WHITE;
   for (n=18; n<27; n++) b[n] = EMPTY;
@@ -717,53 +748,110 @@ void newgame(void) {
   for (n=40; n<45; n++) b[n] = BLUE;
   b[13] = b[22] = b[31] = BLUE;
 
+  // Mark the 8 "central" squares to facilitate simple and efficient test in
+  // evaluate(). (Apparently, Kings are more valuable in central positions.)
   centralsquares[15] = centralsquares[16] =
     centralsquares[19] = centralsquares[20] =
     centralsquares[24] = centralsquares[25] =
     centralsquares[28] = centralsquares[29] = 1;
 
   // set up initial search tree:
+  // "nextjump" marks the top of the stack of saved board states required to
+  // support undo. Only moves involving jumps require an element in the stack.
   nextjump = 0;
+  // Get rid of undo tree from any previous game.
   killnode(undoroot);
   undoroot = root = newnode();
 
-  // make it white's move, so first move is black:
+  // root is a nonexistent move just before the game's first move. Designating
+  // it white's move ensures that first real move is black's.
   root->who = 1;
-  user = 0;
+  user = 0;      // user always starts out black, but can switch any time
   playing = 1;
 }
 
+// Execute the input move, pruning (recursively) all of its (now obsolete)
+// sibling nodes and making the executed node the new root, with the previous
+// root retained in a singly-linked chain of nodes *above* root to support undo.
 void domove(node* move) {
+  // If this move contains jumps, "from" and "to" won't be sufficient to undo:
+  // we must save the entire board in its *pre-move* state in a stack, which is
+  // popped each time a move involving jumps is undone.
   if (move->jump) memmove(jumpboards[nextjump++],b,sizeof(b));
-  makemove(move);
-  extract(move);
-  killnode(root->son);
+  makemove(move);      // execute!
+  extract(move);       // extract to protect from kill
+  killnode(root->son); // kill all but the executed move and its descendants
   // Important Note: old root is not killed, but kept connected to the move we
-  // just made (which becomes the new root). IOW, root is not the base of the
-  // tree.
+  // just made (which becomes the new root) to support undo; thus, the tree
+  // above "root" is a singly-linked chain back to "undoroot".
   root->son = move;
   root = move;
+  // If debugging, call evaluateboard() again with print arg set to display a
+  // detailed breakdown of the score.
   if (debug) evaluateboard(move,1);
 }
 
+// Undo the most recent move.
 node* undomove() {
   node *n = root;
   if (n == undoroot) return 0; // no more undo possible
+  // If most recent move is a jump, the last element of jumpboards[] represents
+  // the state of the entire board prior to the move; otherwise, reconstruct
+  // the old board state using "from" and "to", un-kinging the moved piece if
+  // the move made it a king.
   if (n->jump) memmove(b,jumpboards[--nextjump],sizeof(b));
   else {
     b[n->from] = b[n->to];
     if (n->king) b[n->from] &= (WHITE|BLACK);
     b[n->to] = EMPTY;
   }
+  // Now that we've reversed the effects of the move being undone, rewind root
+  // to preceding move and kill the undone node.
   root = n->father;
+  // Note: There is no reason to keep the chain of nodes rooted at the undone
+  // node. It contains only the nodes whose moves were actually chosen, not
+  // necessarily the optimal moves. If we were to do a full expansion on the
+  // father of the undone node, the resulting "son" path might look
+  // completely different. Moreover, although the scores cached on the "son"
+  // path were correct when those nodes were selected, they will most likely
+  // need to change at least once as part of full expansion before another move
+  // is selected. (Recall that a score is calculated only for leaf nodes, with
+  // leaf scores propagating upwards.) Finally, note that there's a very good
+  // chance that the chain of nodes would have been pruned after the very next
+  // move anyways, since if we're undoing a node, it's very likely we want to
+  // choose a different path.
   killnode(n);
   root->son = 0;
+  // If game was over before the undo, root->value will have one of the large
+  // abs value sentinels (eg, +/-30000), but this is no longer valid, since the
+  // node we just discarded most likely had siblings that were discarded when
+  // the move that led to end of game was chosen. root->value will be
+  // recalculated before it's used for move selection, but for now, just set it
+  // to something that can't be mistaken for game over.
   root->value = 0;	// prevent it from thinking game is over
   playing = 1;
+  // Var "user" indicates the color of (non-computer) player: 0=black 1=white
+  // Black always moves first by rule; the implementation guarantees this by
+  // setting undoroot->who = 1 (white). Undos always occur in pairs (computer
+  // and player) on player's turn, and there is no mechanism for changing
+  // players on an undo. Thus, if user has swapped sides (to white) before
+  // rewinding to start of game (undoroot), the final undomove will be a nop,
+  // effectively swapping player back to black (as at start of game). In such
+  // cases, the user=0 here gets "user" var back in sync with gameplay.
+  // Note: It would be possible, when user has switched sides, to have the
+  // gameplay begin with computer after a rewind (meaning first move would occur
+  // immediately after the final undo), but it's probably better to have a
+  // rewind to start work more like a new game, forcing user to switch back to
+  // white manually before making his first move if that's what he wants.
   if (root == undoroot) user = 0;
   return n;
 }
 
+// usermoves() macro uses _usermoves[] to map valid board move target indices
+// 5-39 to their corresponding col letter (A-H) and 1-based row index (1-8).
+// Ex: Square 5 (B1)
+//   usermoves(5, 1) => 'B'
+//   usermoves(5, 2) => '1'
 const char _usermoves[] =
 "B1D1F1H1A2C2E2G2??B3D3F3H3A4C4E4G4??B5D5F5H5A6C6E6G6??B7D7F7H7A8C8E8G8??";
 #define usermoves(x,y) _usermoves[2*((x)-5)+(y)-1]
@@ -1039,6 +1127,8 @@ void make_pieces() {
 
 #define ISIZE 62	// old: 56
 
+// Draws piece of input type at specified offset, but only if at least part of
+// the piece is within the current clip region.
 void draw_piece(int which, int x, int y) {
   if (!fl_not_clipped(x,y,ISIZE,ISIZE)) return;
   switch (which) {
@@ -1079,12 +1169,14 @@ int squarex(int i) {return (usermoves(i,1)-'A')*BOXSIZE+BMOFFSET;}
 int squarey(int i) {return (usermoves(i,2)-'1')*BOXSIZE+BMOFFSET;}
 
 void Board::draw() {
-  make_pieces();
+  make_pieces(); // do-nothing after first call
   // -- draw the board itself
   fl_draw_box(box(),0,0,w(),h(),color());
   // -- draw all dark tiles
   fl_color((Fl_Color)10 /*107*/);
   int x; for (x=0; x<8; x++) for (int y=0; y<8; y++) {
+    // Optimization Note: Could skip drawing this and other stuff when
+    // fl_not_clipped() returns false.
     if (!((x^y)&1)) fl_rectf(BORDER+x*BOXSIZE, BORDER+y*BOXSIZE,
 			     BOXSIZE-BORDER, BOXSIZE-BORDER);
   }
@@ -1094,12 +1186,22 @@ void Board::draw() {
     fl_rectf(x*BOXSIZE,0,BORDER,h());
     fl_rectf(0,x*BOXSIZE,w(),BORDER);
   }
+  // Draw all pieces except for the one currently being dragged (indicated by
+  // "erase_this"), which will be drawn later.
   for (int j = 5; j < 40; j++) if (j != erase_this) {
     draw_piece(b[j], squarex(j), squarey(j));
   }
+  // Are we showing all legal moves?
+  // Note: showlegal can have 3 values:
+  // 0: show nothing
+  // 1: (set by "legal" menu item)
+  //    show currently available moves
+  // 2: (set by "predict" menu item)
+  //    show all moves along the optimal move path (as far as it's been calculated)
   if (showlegal) {
     fl_color(FL_WHITE);
     node* n;
+    // Draw white arrows between from/to squares for all legal moves.
     for (n = root->son; n; n = showlegal==2 ? n->son : n->brother) {
       int x1 = squarex(n->from)+BOXSIZE/2-5;
       int y1 = squarey(n->from)+BOXSIZE/2-5;
@@ -1115,6 +1217,9 @@ void Board::draw() {
       fl_end_polygon();
       fl_pop_matrix();
     }
+    // Number the arrows drawn above.
+    // showlegal==1 - lower number = better move
+    // showlegal==2 - lower number = earlier move
     int num = 1;
     fl_color(FL_BLACK);
     fl_font(FL_BOLD,10);
@@ -1128,18 +1233,39 @@ void Board::draw() {
       num++;
     }
   }
+  // Draw the dragged piece at its current location (cached in static vars on
+  // each call to drag_piece().
   if (dragging) draw_piece(dragging, dragx, dragy);
 }
 
 // drag the piece on square j to dx dy, or undo drag if j is zero:
+// Note: dx/dy are the offsets from the origin of the piece being dragged.
 void Board::drag_piece(int j, int dx, int dy) {
   dy = (dy&-2) | (dx&1); // make halftone shadows line up
   if (j != erase_this) drop_piece(erase_this); // should not happen
   if (!erase_this) { // pick up old piece
+    // Initiate drag of piece on square j.
     dragx = squarex(j); dragy = squarey(j);
+    // Save index of square whose piece we should skip in the draw loop.
     erase_this = j;
+    // Note: I believe this is somewhat redundant, as we could always obtain
+    // the piece mask from b[erase_this].
     dragging = b[j];
   }
+  // If current drag position is different from saved position, invalidate
+  // square at both positions to ensure that both the uncovered and
+  // newly-covered regions are redrawn.
+  // Note: Simply calling damage(FL_DAMAGE_ALL) would be sufficient to engender
+  // call to draw(), but would give us no way to avoid drawing pieces
+  // unnecessarily.
+  // Optimization Note: Currently, only draw_piece() considers damage bits: it
+  // won't bother drawing a piece that isn't within current clipping region.
+  // draw() itself, however, draws the entire board unconditionally. Docs
+  // suggests that clipping provides some performance benefit even when
+  // application logic doesn't use damage information to skip drawing
+  // operations, but it would probably be better if draw() skipped drawing
+  // portions of the board that don't need it. (Typically, a region of the
+  // board needs to be redrawn only when pieces are being moved over it.)
   if (dx != dragx || dy != dragy) {
     damage(FL_DAMAGE_ALL, dragx, dragy, ISIZE, ISIZE);
     damage(FL_DAMAGE_ALL, dx, dy, ISIZE, ISIZE);
@@ -1216,9 +1342,12 @@ extern Fl_Menu_Item busymenu[];
 
 int Board::handle(int e) {
   if (busy) {
+    // Computer is calculating its move.
     const Fl_Menu_Item* m;
     switch(e) {
     case FL_PUSH:
+      // User is attempting to move, but it's not his turn. Popup the busy menu...
+      // Note: I'm thinking it would be difficult to click this quickly.
       m = busymenu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
       if (m) m->do_callback(this, (void*)m);
       return 1;
@@ -1237,16 +1366,28 @@ int Board::handle(int e) {
   switch (e) {
   case FL_PUSH:
     if (Fl::event_button() > 1) {
+      // Popup context menu
       m = menu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
       if (m) m->do_callback(this, (void*)m);
       return 1;
     }
     if (playing) {
+      // User's turn and he's about to initiate a drag. Expand the root so we
+      // know what moves are legal.
+      // Note: root will generally already be expanded, since the preceding
+      // computer move would have expanded several moves into the future, and
+      // the moves descended from the move selected aren't pruned.
       expandnode(root);
+      // Loop over legal moves...
       for (t = root->son; t; t = t->brother) {
+        // Get coords of this move's starting square.
 	int x = squarex(t->from);
 	int y = squarey(t->from);
+        // Was the mouse down inside current move's square?
 	if (Fl::event_inside(x,y,BOXSIZE,BOXSIZE)) {
+          // Found the piece! Cache mouse click offset relative to its square.
+          // Explanation: As piece is dragged, distance between mouse pointer
+          // and click point determines the piece's current location.
 	  deltax = Fl::event_x()-x;
 	  deltay = Fl::event_y()-y;
 	  drag_piece(t->from,x,y);
@@ -1264,16 +1405,25 @@ int Board::handle(int e) {
     return 1;
   case FL_RELEASE:
     // find the closest legal move he dropped it on:
+    // Loop over all possible moves (children of root) looking for one whose
+    // destination square is sufficiently close to the (dragged) location and
+    // closer than any others.
     dist = 50*50; n = 0;
     for (t = root->son; t; t = t->brother) if (t->from==erase_this) {
+      // Calculate distance between 
       int d1 = Fl::event_x()-deltax-squarex(t->to);
       int d = d1*d1;
       d1 = Fl::event_y()-deltay-squarey(t->to);
       d += d1*d1;
       if (d < dist) {dist = d; n = t;}
     }
+    // If none of the candidate moves is consistent with the drop location,
+    // call drop_piece() with the *old* square index to cancel the drag; else
+    // call it with "to" to complete the drag. Note that the index determines
+    // which location (in addition to current) is "damaged" for redraw.
     if (!n) {drop_piece(erase_this); return 1;} // none found
     drop_piece(n->to);
+    // Complete the move.
     domove(n);
     if (showlegal) {showlegal = 0; redraw();}
     if (n->jump) redraw();
@@ -1363,6 +1513,7 @@ void switch_cb(Fl_Widget*pb, void*) {
   ((Board*)pb)->computer_move(0);
 }
 
+// Undo last 2 moves: player and computer.
 void undo_cb(Fl_Widget*pb, void*) {
   Board* b = (Board*)pb;
   b->animate(undomove(),1);
