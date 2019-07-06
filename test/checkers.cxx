@@ -1,4 +1,4 @@
-// vim:et:sw=2
+// vim:sw=2:ts=8:tw=80
 //
 // "$Id$"
 //
@@ -661,7 +661,8 @@ int fullexpand(node *f, int level) {
 }
 
 // Go one level deeper along the "son" path (i.e., the current best at each
-// level).
+// level), allowing the more accurate evaluation score obtained to propagate
+// upwards, potentially changing the optimal path.
 // Explanation: A prior call to fullexpand() has ensured a somewhat uniform
 // expansion (limited by either nodes created or board states evaluated). At
 // that point, root->son represents the *current* best move; however, instead
@@ -670,10 +671,11 @@ int fullexpand(node *f, int level) {
 // time we descend and evaluate, we propagate the score upwards, doing an
 // extract()/insert() at each level to ensure that the new information has the
 // capacity to change the decisions made at higher levels if appropriate.
-// Note: A call to descend() doesn't necessarily change the depth of the "son":
-// if the newly added node makes the current best move worse, the
-// extract()/insert() may move its parent away from the head position amongst
-// its siblings (thereby moving the newly added node off the "son" path).
+// Note: A call to descend() doesn't necessarily change the depth of the "son"
+// path: if the newly added node makes the current best move worse, the
+// extract()/insert() may move the new node's parent out of the head position
+// amongst its siblings (thereby moving the newly added node out of the "son"
+// path).
 int descend(node *f) {
   static int depth;
   if (didabort() || nodes > maxnodes || depth >= maxply) return(0);
@@ -693,14 +695,16 @@ int descend(node *f) {
 
 char debug;
 
-// Return the best move.
+// Return the best move (NULL if none).
+// Note: Caller in VT100 case doesn't properly test for NULL, but it's not
+// generally a problem since
 // Logic: root represents the most recently executed move. It will typically be
-// somewhat expanded already, since the end of move logic doesn't delete nodes
+// partially expanded already, since the end of move logic doesn't delete nodes
 // under the move that is ultimately selected. However, the tree will generally
 // contain far fewer nodes than it did just before the last move was selected
 // (since irrelevant nodes are pruned once a decision is made). Thus, we run
 // fullexpand() in a loop, attempting to go deeper and deeper (albeit in a
-// uniform fashion, unlike recurse()) until one of the following conditions is
+// uniform fashion, unlike descend()) until one of the following conditions is
 // met:
 // 1) sentinel high score (abs_val == 30000) has propagated upwards indicating
 //    someone has no more moves
@@ -716,13 +720,13 @@ char debug;
 // leaf, whereupon it expands one level and re-evaluates the board. This
 // evaluation represents an improvement over the previous prediction, as it
 // takes one more move into account; thus, when the new score is propagated
-// upwards (in the postorder path of the descend() traversal),
+// upwards (in the postorder traversal position of the descend() traversal),
 // extract()/insert() are performed at each level to ensure that the "son" path
 // can change to reflect the additional information. As with the fullexpand()
 // recursion, there are 2 ways to break the recursion:
 // 1) sentinel high score
 // 2) descend() returns 0 indicating either that maxnodes have been created or
-//    max depth has been reached
+//    max depth ("maxply") has been reached
 //    Note: Unlike fullexpand() recursion, there's no check on # of node
 //    evaluations here.
 // Note: It's not expected that either the fullexpand() or descend() loops would
@@ -753,8 +757,8 @@ node *calcmove(node *root) {	// return best move after root
 
 node *root,*undoroot;
 
-piece jumpboards[24][45];	// saved boards for undoing jumps
-int nextjump;
+piece jumpboards[24][45];	// stack of saved boards for undoing jumps
+int nextjump;                   // stack index for jumpboards[]
 
 char user;	// 0 = black, 1 = white
 char playing;   // cleared when game over to stop move calculation and such
@@ -774,7 +778,8 @@ void newgame(void) {
   b[13] = b[22] = b[31] = BLUE;
 
   // Mark the 8 "central" squares to facilitate simple and efficient test in
-  // evaluate(). (Apparently, Kings are more valuable in central positions.)
+  // evaluate().
+  // Rationale: Kings are more valuable in central positions.
   centralsquares[15] = centralsquares[16] =
     centralsquares[19] = centralsquares[20] =
     centralsquares[24] = centralsquares[25] =
@@ -873,7 +878,8 @@ node* undomove() {
 }
 
 // usermoves() macro uses _usermoves[] to map valid board move target indices
-// 5-39 to their corresponding col letter (A-H) and 1-based row index (1-8).
+// 5-39 to the corresponding col letter (A-H) or 1-based row index (1-8).
+// Note: 2nd arg determines whether col or row is sought: 1=col, 2=row.
 // Ex: Square 5 (B1)
 //   usermoves(5, 1) => 'B'
 //   usermoves(5, 2) => '1'
@@ -1098,6 +1104,9 @@ int VT100main() {
     node* move;
     if (playing && (autoplay || root->who == user)) {
       move = calcmove(root);
+      // Note: It's not necessary to check for NULL move here because calcmove()
+      // returns NULL only when there are no moves, and the earlier test for
+      // !root->son ensures we never call calcmove() in that case.
       if (move->value <= -30000) {
  	printf("%s resigns.", move->who ? "White" : "Black");
  	move = 0;
@@ -1111,8 +1120,7 @@ int VT100main() {
     }
     if (move) {
       dumpnode(move,0);
-      // Partial Understanding Note: domove performs the move, then clears out
-      // the node tree, leaving only move as both root and son.
+      // Execute the selected move.
       domove(move);
       VT100move(move,0);
     }
@@ -1647,6 +1655,8 @@ int main(int argc, char **argv) {
 #ifdef BOTH
   fl_register_images();
   int i = 1;
+  // Use arg() callback to check command line args for -t switch, setting
+  // terminal=1 if found.
   if (Fl::args(argc, argv, i, arg) < argc) {
     fprintf(stderr," -t : use VT100 display\n", Fl::help);
     exit(1);
