@@ -1,4 +1,4 @@
-// vim:sw=2:ts=8:tw=80
+// vim:sw=2:ts=8:noet:tw=80
 //
 // "$Id$"
 //
@@ -99,18 +99,18 @@ const int noise=2;		// values less or eq to this apart are eq
 
 struct node {
   node *father;
-  node *son;             // best son
-  node *brother;         // next brother
-  short int value;       // value of this board position to player making move
+  node *son;		// best son
+  node *brother;	// next brother
+  short int value;	// value of this board position to player making move
   unsigned char from,to; // the move to reach this board
-  long int jump;         // bit map of locations jumped
+  long int jump;	// bit map of locations jumped
   unsigned char mobil;
   unsigned char deny;
   unsigned char pin;
   unsigned char threat;
   short int gradient;
-  unsigned who:1;        // 0 = black's move, 1 = white's move
-  unsigned king:1;       // 1 = move causes piece to be kinged
+  unsigned who:1;	// 0 = black's move, 1 = white's move
+  unsigned king:1;	// 1 = move causes piece to be kinged
   unsigned back:1;
   unsigned moc2:1;
   unsigned moc3:1;
@@ -142,7 +142,7 @@ typedef char piece;
 // Define bitmask used to represent a square's contents and enumerate some
 // useful combinations (e.g., BLACKKING == BLACK|KING) for convenience.
 // Note: BLUE is used for border squares to make it easy to distinguish an
-// invalid move target from an empty square.
+// invalid move target from a valid but empty square.
 #define EMPTY 0
 #define BLACK 1
 #define WHITE 2
@@ -163,26 +163,26 @@ const piece flip[9] = {
 // insignificant, except that any zeroes must come last, since the move
 // generator in movepiece() treats 0 as a terminator.
 const int offset[9][4] = {	// legal move directions
-  {0,0,0,0},    // EMPTY
-  {-5,-4,0,0},  // BLACK
-  {4,5,0,0},    // WHITE
-  {0,0,0,0},    // N/A
-  {0,0,0,0},    // N/A (king must be black or white)
-  {4,5,-4,-5},  // BLACKKING
-  {4,5,-4,-5},  // WHITEKING
-  {0,0,0,0},    // N/A
-  {0,0,0,0}     // BLUE (no piece)
+  {0,0,0,0},	// EMPTY
+  {-5,-4,0,0},	// BLACK
+  {4,5,0,0},	// WHITE
+  {0,0,0,0},	// N/A
+  {0,0,0,0},	// N/A (king must be black or white)
+  {4,5,-4,-5},	// BLACKKING
+  {4,5,-4,-5},	// WHITEKING
+  {0,0,0,0},	// N/A
+  {0,0,0,0}	// BLUE (no piece)
 };
 
-piece b[45];             // current board state being considered
+piece b[45];		// current board state being considered
 
-int evaluated;           // number of moves evaluated this turn
+int evaluated;		// number of moves evaluated this turn
 
 char centralsquares[45]; // flag array marking the 8 central squares
 char is_protected[45];
 
-piece flipboard[45];     // swapped if enemy is black
-piece *tb;               // pointer to real or swapped board
+piece flipboard[45];	// swapped if enemy is black
+piece *tb;		// pointer to real or swapped board
 #define FRIEND BLACK
 #define FRIENDKING BLACKKING
 #define ENEMY WHITE
@@ -603,7 +603,14 @@ int didabort(void);
 int fullexpand(node *f, int level) {
   // Impose limits on the recursion.
   // Logic: Stop when we've created max # of nodes or evaluated max # of moves
-  // for a single turn.
+  // for a single turn, or when user has done something that sets the abortflag:
+  // e.g., clicked "stop" on the busymenu or used CTRL-C to generate SIGINT.
+  // Note: calcmove() is generally very fast, so it's unlikely didabort() would
+  // return true during ordinary gameplay, but getting an abort due to user
+  // clicking "stop" in the busymenu to terminate an autoplay sequence would not
+  // be unusual, and I'm thinking it could be slightly problematic that we abort
+  // the fullexpand() instead of simply stopping after the current move in that
+  // scenario.
   if (didabort() || nodes > maxnodes-(maxply*10) || evaluated > maxevaluate) return(0);
   // Expand a single level (possibly with multiple jumps).
   // Note: The work of constructing nodes representing candidate moves is done
@@ -758,11 +765,11 @@ node *calcmove(node *root) {	// return best move after root
 node *root,*undoroot;
 
 piece jumpboards[24][45];	// stack of saved boards for undoing jumps
-int nextjump;                   // stack index for jumpboards[]
+int nextjump;			// stack index for jumpboards[]
 
 char user;	// 0 = black, 1 = white
-char playing;   // cleared when game over to stop move calculation and such
-char autoplay;  // enables computer playing for both players
+char playing;	// cleared when game over to stop move calculation and such
+char autoplay;	// enables computer playing for both players
 
 void newgame(void) {
 
@@ -789,14 +796,14 @@ void newgame(void) {
   // "nextjump" marks the top of the stack of saved board states required to
   // support undo. Only moves involving jumps require an element in the stack.
   nextjump = 0;
-  // Get rid of undo tree from any previous game.
+  // Get rid of undo tree (and node tree) from any previous game.
   killnode(undoroot);
   undoroot = root = newnode();
 
   // root is a nonexistent move just before the game's first move. Designating
   // it white's move ensures that first real move is black's.
   root->who = 1;
-  user = 0;      // user always starts out black, but can switch any time
+  user = 0;	// user always starts out black, but can switch any time
   playing = 1;
 }
 
@@ -808,9 +815,9 @@ void domove(node* move) {
   // we must save the entire board in its *pre-move* state in a stack, which is
   // popped each time a move involving jumps is undone.
   if (move->jump) memmove(jumpboards[nextjump++],b,sizeof(b));
-  makemove(move);      // execute!
-  extract(move);       // extract to protect from kill
-  killnode(root->son); // kill all but the executed move and its descendants
+  makemove(move);	// execute!
+  extract(move);	// extract to protect from kill
+  killnode(root->son);	// kill all but the executed move and its descendants
   // Important Note: old root is not killed, but kept connected to the move we
   // just made (which becomes the new root) to support undo; thus, the tree
   // above "root" is a singly-linked chain back to "undoroot".
@@ -906,18 +913,45 @@ void dumpnode(node *n, int help) {
   printf(" (%+d).\n",n->value);
 }
 
+// Set to 1 to terminate a fullexpand() or descend() recursion.
+// Currently set by either CTRL-C (SIGINT) or "stop" in the busymenu.
+// Possible Issue: On modern computers, calcmove()'s execution time is typically
+// negligible; thus, it would be rare for busymenu "stop" to be used to stop a
+// long-running computer move. It would more likely be used to terminate a
+// long-running autoplay sequence. The problem is that, because didabort() can
+// terminate a node expansion in progress, depending on the precise instant
+// "stop" is clicked, the final move before the termination may benefit from
+// less than the normal amount of lookahead: not catastrophic, but if the object
+// is simply to pause autoplay, and the total time for calcmove is on the order
+// of a millisecond, would it not be better to wait for calcmove() to complete,
+// thereby ensuring that the final move before user resumes control is an
+// intelligent one?
+// Possible Solutions:
+// 1. Move the checks on abortflag from fullexpand() and descend() to the code
+//    sites implementing autoplay (autoplay_cb (FLTK) and VT100main (VT100)).
+// 2. Break abortflag into 2 flags: one used to stop an autoplay sequence, the
+//    other used to terminate a long-running computer move.
+// 3. Change parameters maxply, maxnodes and maxevaluate to values more suitable
+//    for modern cpu speeds. (Original version of game was written in 1978; not
+//    sure parameters have been updated since...)
+// Note: These approaches are not mutually-exclusive.
 int abortflag;
 
 ////////////////////////////////////////////////////////////////
 // VT100 Interface:
 #ifdef VT100
 
+// Use terminal escape sequence to position cursor at the row/col corresponding
+// to input board square index.
 void positioncursor(int i) {
   printf("\033[%d;%dH",
 	 usermoves(i,2)-'0'+1,
 	 2*(usermoves(i,1)-'A')+1);
 }
 
+// Output 2 chars for input piece value:
+// BB=Black WW=White BK=Black King WK=White King
+// Precondition: Cursor is positioned over the square.
 void outpiecename(piece n) {
   printf(n&BLACK ? "\033[1;7m" : "\033[1m");
   putchar(" BW??BW??"[n]);
@@ -925,6 +959,9 @@ void outpiecename(piece n) {
   printf("\033[0m");
 }
 
+// Redraw the board with pieces in locations indicated by b[].
+// Note: This is called once at the start of the game, as well as for a redraw,
+// but VT100move handles the more limited redraws that occur after each move.
 void VT100board(void) {
   printf("\033<\033[H\033[J\033[10r");
   int l = 0;
@@ -948,6 +985,7 @@ void VT100board(void) {
   }
 }
 
+// Redraw just the pieces involved in the input move.
 void VT100move(node *n, int) {
   if (!n) return;
   printf("\0337");
@@ -1054,13 +1092,16 @@ node *getusermove(void) {
     user = !user;
     return(root);
   case 'U':
+    // Undo last computer move and last user move.
     VT100move(undomove(),1);
     VT100move(undomove(),1);
     return(0);
   case '+':
+    // Increase lookahead on move calculation.
     maxevaluate = maxnodes = 2*maxevaluate;
     goto J2;
   case '-':
+    // Decrease lookahead on move calculation.
     if (maxevaluate > 1)
       maxevaluate = maxnodes = maxevaluate/2;
   J2: printf("Moves evaluated set to %d.",maxevaluate);
@@ -1102,6 +1143,7 @@ int VT100main() {
       }
     }
     node* move;
+    // If game active and we're autoplaying or it's computer's turn...
     if (playing && (autoplay || root->who == user)) {
       move = calcmove(root);
       // Note: It's not necessary to check for NULL move here because calcmove()
@@ -1122,6 +1164,7 @@ int VT100main() {
       dumpnode(move,0);
       // Execute the selected move.
       domove(move);
+      // Display the move.
       VT100move(move,0);
     }
   }
@@ -1373,13 +1416,20 @@ void Board::computer_move(int help) {
 extern Fl_Menu_Item menu[];
 extern Fl_Menu_Item busymenu[];
 
+// Handle events sent to the Board window
+// Input: enumerated value indicating the event to be handled
+// Return: As a general rule, we return 1 to indicate the event has been
+// handled, 0 otherwise. Note that the return value can affect subsequent event
+// handling in an event-specific way: e.g., returning 1 for FL_PUSH ensures that
+// subsequent FL_DRAG events will be sent to this window.
 int Board::handle(int e) {
   if (busy) {
     // Computer is calculating its move.
     const Fl_Menu_Item* m;
     switch(e) {
     case FL_PUSH:
-      // User is attempting to move, but it's not his turn. Popup the busy menu...
+      // User is attempting to move, but it's not his turn. Popup busy menu to
+      // give user a chance to stop, toggle autoplay off, etc...
       // Note: I'm thinking it would be difficult to click this quickly.
       m = busymenu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
       if (m) m->do_callback(this, (void*)m);
@@ -1428,6 +1478,10 @@ int Board::handle(int e) {
 	}
       }
     }
+    // Rationale: Although returning 0 may cause FLTK to keep looking for a
+    // child to handle an event that we've effectively already "handled" by
+    // determining there's nothing to do (i.e., because !playing), returning 1
+    // would cause us to begin receiving (pointless) FL_DRAG events.
     return 0;
   case FL_SHORTCUT:
     m = menu->test_shortcut();
