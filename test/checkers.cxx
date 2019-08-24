@@ -48,7 +48,7 @@ const char* copyright =
 // Define both to get a program that takes a -t switch
 
 #define FLTK
-#define VT100
+//#define VT100
 
 #undef check
 
@@ -629,8 +629,10 @@ int fullexpand(node *f, int level) {
   // Stop recursion when desired depth is reached. Note that calcmove first
   // calls fullexpand with level == 1, which means only direct children are
   // expanded; however, it keeps incrementing level and retrying as long as the
-  // board value produced is less than a threshold. IOW, we look ahead only as
-  // far as necessary to find a move that gives a sufficiently good advantage.
+  // board value produced is less than the sentinel "gameover" value, and the
+  // tree fullness parameters haven't been reached. IOW, we look ahead uniformly
+  // (breadth-first) along all decision paths until the tree is sufficiently
+  // fleshed out to support subsequent decision-making.
   // Note: !n->jump test ensures we treat a series of jumps as atomic.
   // Note: n->brother test reflects fact that a son with no brother is
   // practically zero-cost (no fanout), and thus, shouldn't count as a full
@@ -704,7 +706,7 @@ char debug;
 
 // Return the best move (NULL if none).
 // Note: Caller in VT100 case doesn't properly test for NULL, but it's not
-// generally a problem since
+// generally a problem since VT100 main won't call us when root->son is null.
 // Logic: root represents the most recently executed move. It will typically be
 // partially expanded already, since the end of move logic doesn't delete nodes
 // under the move that is ultimately selected. However, the tree will generally
@@ -739,14 +741,16 @@ char debug;
 // Note: It's not expected that either the fullexpand() or descend() loops would
 // ever be terminated by an actual (non-sentinel) score over 28000; termination
 // typically occurs because one of the max parameters has been hit.
-node *calcmove(node *root) {	// return best move after root
+node *calcmove(node *root, bool predict = false) {	// return best move after root
   expandnode(root);
   if (!root->son) return(0);	// no move due to loss
   if (debug) printf("calcmove() initial nodes = %d\n",nodes);
   evaluated = 0;
-  // If only 1 child, there's no choice to be made: an only child is the best
-  // move by definition.
-  if (root->son->brother) {
+  // If only 1 child (e.g., because of mandatory jump), there's no choice to be
+  // made: an only child is the best move by definition; however, if we're in
+  // 'predict' mode, always do full expansion.
+  // Rationale: Supports visual representation of likely future moves.
+  if (root->son->brother || predict) {
     int x;
     for (x = 1; abs(root->value)<28000 && fullexpand(root,x); x++);
     piece saveboard[45]; memmove(saveboard,b,sizeof(b));
@@ -1081,6 +1085,9 @@ node *getusermove(void) {
     return(0);
   case 'P':
     printf("I expect the following moves:\n");
+    // TODO: Add logic similar to what was added to FLTK predict_cb, to ensure
+    // we show plenty of moves into the future both at start of game, and after
+    // an undo that leaves a mandatory move at root.
     for (t = root->son; t; t = t->son) dumpnode(t,0);
     break;
   case 'Q':
@@ -1387,6 +1394,16 @@ void Board::animate(node* move, int backwards) {
 
 int busy; // causes pop-up abort menu
 
+// Idea: Consider moving computer_move to a worker thread.
+// Rationale: We could crank up the "intelligence" parameters significantly (I
+// suspect the current defaults may date back many years), and provide a nice UI
+// for altering them (e.g., a dial widget) and viewing not only the parameters,
+// but also some indication of calc_move's current progress. The UI would give
+// user a way to stop the recursion at any time: either by dialing back on the
+// intelligence, or by clicking "stop" (in which case, calc_move would simply
+// use whatever has already been calculated).
+// Note: This idea could probably be implemented without creating a worker
+// thread.
 void Board::computer_move(int help) {
   if (!playing) return;
   cursor(FL_CURSOR_WAIT);
@@ -1428,9 +1445,10 @@ int Board::handle(int e) {
     const Fl_Menu_Item* m;
     switch(e) {
     case FL_PUSH:
-      // User is attempting to move, but it's not his turn. Popup busy menu to
-      // give user a chance to stop, toggle autoplay off, etc...
-      // Note: I'm thinking it would be difficult to click this quickly.
+      // User has clicked mouse while computer is busy calculating move
+      // (possibly calculating a series of moves for both player and computer as
+      // part of an ongoing autoplay sequence). Popup busy menu to give user a
+      // chance to stop computer move, terminate autoplay sequence, etc...
       m = busymenu->popup(Fl::event_x(), Fl::event_y(), 0, 0, 0);
       if (m) m->do_callback(this, (void*)m);
       return 1;
@@ -1525,10 +1543,13 @@ void quit_cb(Fl_Widget*, void*) {exit(0);}
 
 int FLTKmain(int argc, char** argv) {
   Fl::visual(FL_DOUBLE|FL_INDEX);
+  // Create an Fl_Double_Window subclass representing the board.
   Board b(BOARDSIZE,BOARDSIZE);
   b.color(FL_BACKGROUND_COLOR);
   b.callback(quit_cb);
   b.show(argc,argv);
+  // Run the FLTK event loop. All subsequent game logic executed from
+  // Board::handler(), invoked to handle user interaction.
   return Fl::run();
 } 
 
@@ -1591,7 +1612,9 @@ void legal_cb(Fl_Widget*pb, void*) {
 
 void predict_cb(Fl_Widget*pb, void*) {
   if (showlegal == 2) {showlegal = 0; ((Board*)pb)->redraw(); return;}
-  if (playing) expandnode(root);
+  // Call calcmove with 'predict' flag to ensure we fully expand the decision
+  // tree, even if it's not necessary to choose the next move.
+  if (playing) calcmove(root, true);
   showlegal = 2; ((Board*)pb)->redraw();
 }
 
@@ -1693,6 +1716,9 @@ int didabort(void) {
 #ifdef BOTH
   if (!terminal)
 #endif
+    // Note: Without this call, events will not be processed during long-running
+    // computation: e.g., it would be impossible to stop and autoplay sequence
+    // once started.
     Fl::check();
 #endif
   if (abortflag) {
