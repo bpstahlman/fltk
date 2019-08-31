@@ -634,6 +634,7 @@ int fullexpand(node *f, int level) {
   // (breadth-first) along all decision paths until the tree is sufficiently
   // fleshed out to support subsequent decision-making.
   // Note: !n->jump test ensures we treat a series of jumps as atomic.
+  // TODO: Revisit the previous statment: don't think it's correct.
   // Note: n->brother test reflects fact that a son with no brother is
   // practically zero-cost (no fanout), and thus, shouldn't count as a full
   // ply.
