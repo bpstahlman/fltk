@@ -1,3 +1,4 @@
+// vim:sw=2:ts=8:noet:tw=80
 //
 // "$Id$"
 //
@@ -857,6 +858,7 @@ int VT100main() {
 
 #include <FL/Fl.H>
 #include <FL/Fl_Double_Window.H>
+#include <FL/Fl_Overlay_Window.H>
 #include <FL/Fl_PNG_Image.H>
 #include <FL/fl_draw.H>
 #include <FL/Fl_Menu_Item.H>
@@ -896,15 +898,69 @@ void draw_piece(int which, int x, int y) {
 
 //----------------------------------------------------------------
 
-class Board : public Fl_Double_Window {
+class Board;
+class Next;
+class Stepmode {
+  public:
+  struct Move {
+    friend bool operator!=(const Move &move, const node &node);
+    friend bool operator==(const Move &move, const node &node);
+    unsigned char from, to;
+    Move(unsigned char f, unsigned char t) : from(f), to(t) {}
+  };
+  struct Next {
+    Next *prev;
+    Move move;
+    Next(Next *n, unsigned char from, unsigned char to)
+      : prev(n), move(from, to) {}
+  };
+  private:
+  Board *board;
+  bool active;
+  node *next;
+  node *base;
+  Next *nexts;
+  public:
+  Stepmode() : board(NULL), active(false), next(NULL), base(NULL), nexts(NULL) {}
+  bool is_active() { return active; }
+  bool is_next(node *n) { return n == next; }
+  void activate(Board *b);
+  void deactivate();
+  void forward();
+  void backward();
+  void better();
+  void worse();
+  void resume();
+  void revert();
+  private:
+  void find_next();
+  void push_next() {
+    nexts = new Next(nexts, next->from, next->to);
+  }
+  void pop_next();
+};
+
+// TODO: Consider adding as member of move...
+bool operator!=(const Stepmode::Move &move, const node &node) {
+  return move.from != node.from || move.to != node.to;
+}
+bool operator==(const Stepmode::Move &move, const node &node) {
+  return !(move != node);
+}
+
+static Stepmode stepmode;
+
+class Board : public Fl_Overlay_Window {
   void draw();
+  void draw_overlay();
   int handle(int);
+  int handle_stepmode(int);
 public:
   void drag_piece(int, int, int);
   void drop_piece(int);
   void animate(node* move, int backwards);
   void computer_move(int);
-  Board(int w, int h) : Fl_Double_Window(w,h,"FLTK Checkers") {color(15);}
+  Board(int w, int h) : Fl_Overlay_Window(w,h,"FLTK Checkers") {color(15);}
 };
 
 #define BOXSIZE 52
@@ -940,7 +996,8 @@ void Board::draw() {
   for (int j = 5; j < 40; j++) if (j != erase_this) {
     draw_piece(b[j], squarex(j), squarey(j));
   }
-  if (showlegal) {
+  int stepping = stepmode.is_active() ? 1 : 0;
+  if (showlegal || stepping) {
     fl_color(FL_WHITE);
     node* n;
     for (n = root->son; n; n = showlegal==2 ? n->son : n->brother) {
@@ -948,6 +1005,14 @@ void Board::draw() {
       int y1 = squarey(n->from)+BOXSIZE/2-5;
       int x2 = squarex(n->to)+BOXSIZE/2-5;
       int y2 = squarey(n->to)+BOXSIZE/2-5;
+
+      if (stepping && stepmode.is_next(n)) {
+	fl_color(FL_GREEN);
+	fl_line_style(FL_DASHDOT, 2, NULL);
+      } else {
+	fl_color(FL_WHITE);
+	fl_line_style(FL_SOLID, 0, NULL);
+      }
       fl_line(x1,y1,x2,y2);
       fl_push_matrix();
       fl_mult_matrix(x2-x1,y2-y1,y1-y2,x2-x1,x2,y2);
@@ -972,6 +1037,15 @@ void Board::draw() {
     }
   }
   if (dragging) draw_piece(dragging, dragx, dragy);
+}
+
+void Board::draw_overlay() {
+  if (stepmode.is_active()) {
+    fl_color(FL_BLACK);
+    fl_font(FL_BOLD,24);
+    fl_draw("STEP MODE!", 200, 200);
+  }
+
 }
 
 // drag the piece on square i to dx dy, or undo drag if i is zero:
@@ -1056,7 +1130,42 @@ void Board::computer_move(int help) {
 extern Fl_Menu_Item menu[];
 extern Fl_Menu_Item busymenu[];
 
+int Board::handle_stepmode(int e) {
+  if (stepmode.is_active() && e == FL_KEYDOWN) {
+    switch (Fl::event_key()) {
+      case FL_Right:
+	stepmode.forward();
+	break;
+      case FL_Left:
+	stepmode.backward();
+	break;
+      case FL_Up:
+	stepmode.better();
+	break;
+      case FL_Down:
+	stepmode.worse();
+	break;
+      case FL_Escape:
+	stepmode.revert();
+	break;
+      case FL_Enter:
+	stepmode.resume();
+	break;
+      default:
+	return 0;
+    }
+    // Valid command
+    return 1;
+  }
+  // Not in stepmode or no keypress
+  return 0;
+}
+
 int Board::handle(int e) {
+  // TODO: Decide how to integrate: I'm thinking no busy menu during this mode.
+  int ret = handle_stepmode(e);
+  if (ret) return ret;
+
   if (busy) {
     const Fl_Menu_Item* m;
     switch(e) {
@@ -1126,6 +1235,103 @@ int Board::handle(int e) {
   }
 }
 
+void Stepmode::activate(Board *b) {
+  nexts = NULL;
+  board = b;
+  active = true;
+  // Show all legal moves.
+  showlegal = 1;
+  find_next();
+  base = root;
+  board->redraw_overlay();
+  ((Fl_Widget *)board)->redraw();
+}
+void Stepmode::deactivate() {
+  active = false;
+  board = NULL;
+  next = base = NULL;
+  showlegal = 0;
+}
+
+void Stepmode::find_next() {
+  board->cursor(FL_CURSOR_WAIT);
+  next = calcmove(root);
+  printf("showlegal=%d\n", showlegal);
+  if (next) {
+    // FIXME!
+    if (next->value <= -30000) {
+      fl_message("%s resigns", next->who ? "White" : "Black");
+    }
+  }
+
+  board->cursor(FL_CURSOR_DEFAULT);
+  // Make sure the move arrows are updated.
+  // FIXME: Probably have a special damage value to request this.
+  board->redraw();
+}
+
+void Stepmode::pop_next() {
+  Next *rem = nexts;
+  if (rem) {
+    nexts = nexts->prev;
+    Move move(rem->move.from, rem->move.to);
+
+    // Find and select the popped move.
+    next = root->son;
+    for (; move != *next; next = next->brother) ;
+
+    delete rem;
+  }
+}
+
+
+void Stepmode::forward() {
+  printf("forward\n");
+  // Save this level's next on a stack list
+  push_next();
+  // FIXME: How fast should it be? Instantaneous?
+  board->animate(next,0);
+  domove(next);
+
+  find_next();
+  board->redraw();
+}
+void Stepmode::backward() {
+  if (root == base) {
+    // FIXME! Can't go back further than base!
+    printf("Hit start!\n");
+    return;
+  }
+  printf("backward\n");
+  board->animate(undomove(),1);
+  find_next();
+  pop_next();
+  board->redraw();
+}
+void Stepmode::better() {
+  if (next != root->son) {
+    printf("better move\n");
+    node *stop = next;
+    for (next = root->son; next->brother != stop; next = next->brother) ;
+  }
+  board->redraw();
+}
+void Stepmode::worse() {
+  if (next->brother) {
+    printf("worse move\n");
+    next = next->brother;
+  }
+  board->redraw();
+}
+void Stepmode::resume() {
+  printf("continue from here\n");
+  stepmode.deactivate();
+}
+void Stepmode::revert() {
+  printf("revert to point of mode entry\n");
+  stepmode.deactivate();
+}
+
 void quit_cb(Fl_Widget*, void*) {exit(0);}
 
 int FLTKmain(int argc, char** argv) {
@@ -1143,6 +1349,19 @@ void autoplay_cb(Fl_Widget*bp, void*) {
   Board* b = (Board*)bp;
   autoplay = 1;
   while (autoplay) {b->computer_move(0); b->computer_move(0);}
+}
+
+void stepmode_cb(Fl_Widget* bp, void *) {
+  Board* b = (Board*)bp;
+
+  // Activate the mode
+  // FIXME: Clean this up, perhaps with a toggle.
+  if (stepmode.is_active())
+    stepmode.deactivate();
+  else
+    stepmode.activate(b);
+
+
 }
 
 #include <FL/Fl_Box.H>
@@ -1250,6 +1469,7 @@ void continue_cb(Fl_Widget*, void*) {}
 
 Fl_Menu_Item menu[] = {
   {"Autoplay", 'a', autoplay_cb},
+  {"Step mode", 't', stepmode_cb},
   {"Legal moves", 'l', legal_cb},
   {"Move for me", 'm', move_cb},
   {"New game", 'n', newgame_cb},
