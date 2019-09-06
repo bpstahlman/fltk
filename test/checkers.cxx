@@ -409,7 +409,9 @@ void extract(node *n) {
   n->brother = 0;
 }
 
-// Delete a node, returning it and all its descendants to the free list.
+// Delete a node, returning it and all its descendants (at same and lower
+// levels) to the free list.
+// Note: In this context, lower-scored siblings are considered "descedants".
 void killnode(node *x) {
   if (!x) return;
   node *y;
@@ -534,11 +536,15 @@ void movepiece(node* f, int i, node* jnode) {
       // Explanation: movepiece() continues to recurse until there are no more
       // jumps, at which point, evaluateboard() is called to score the node and
       // the node is inserted in sorted position. The test of jumphappened
-      // ensures that only the final node created during the recursion is
-      // evaluated/inserted; the others are discarded with killnode() in the
-      // postorder traversal, since they're needed only for the information they
-      // carry in their from/jump/king fields, which is merged into each new
-      // node created.
+      // ensures that when jumps are mandatory, only the final node created
+      // during the recursion is evaluated/inserted; the others are discarded
+      // with killnode() in the postorder traversal, since they're needed only
+      // for the information they carry in their from/jump/king fields, which is
+      // merged into each new node created.
+      // Note: When jumps are optional, we insert the intermediate jump nodes
+      // (containing a subset of all possible jumps), since it's possible that a
+      // move that doesn't take all possible jumps ends up being better than one
+      // that does.
       // Important Note: All of the jump nodes are children of the same father
       // (the one preceding the first jump in the sequence); thus, the recursive
       // killnode() can be safely used on the throwaway nodes without affecting
@@ -600,6 +606,9 @@ int didabort(void);
 // Expand the input node recursively down to depth indicated by "level" (unless
 // one of the limit thresholds is hit first), propagating scores calculated for
 // leaf nodes upwards in the postorder traversal return path.
+// Return: Return 0 to terminate full expansion, 1 to continue.
+// Note: We return 1 when we can't recurse any further (due to lack of son
+// move), because we don't want to prevent brothers from recursing.
 int fullexpand(node *f, int level) {
   // Impose limits on the recursion.
   // Logic: Stop when we've created max # of nodes or evaluated max # of moves
@@ -630,14 +639,26 @@ int fullexpand(node *f, int level) {
   // calls fullexpand with level == 1, which means only direct children are
   // expanded; however, it keeps incrementing level and retrying as long as the
   // board value produced is less than the sentinel "gameover" value, and the
-  // tree fullness parameters haven't been reached. IOW, we look ahead uniformly
-  // (breadth-first) along all decision paths until the tree is sufficiently
-  // fleshed out to support subsequent decision-making.
-  // Note: !n->jump test ensures we treat a series of jumps as atomic.
-  // TODO: Revisit the previous statment: don't think it's correct.
+  // tree fullness parameters haven't been reached. IOW, it's basically an
+  // inefficient way to implement a bread-first traversal using inherently
+  // depth-first recursion functions.
+  // Optimization Idea: Instead of starting level at 1, pick a starting depth
+  // likely to be closer to what is ultimately required to satisfy the tree
+  // fullness parameters, then iteratively adjust "level" up or down till we
+  // hit the thresholds. Note that downward adjustment (if necessary), could be
+  // performed without restarting from root, though that would probably
+  // complicate the implementation somewhat.
   // Note: n->brother test reflects fact that a son with no brother is
   // practically zero-cost (no fanout), and thus, shouldn't count as a full
   // ply.
+  // Note: Never end recursion on a jump move.
+  // Rationale: When forcejumps is off, a sequence of N jumps is represented as
+  // N nodes, each but the last containing only a subset of the available jumps.
+  // If we stop recursion immediately after creating a set of such nodes,
+  // we might as well not have created the ones with fewer than N jumps, since
+  // if we don't evaluate moves beyond the jump, the N-jump will always win.
+  // Also Note: I don't believe it's part of the reason for the test, but it
+  // should be pointed out that jumps tend to reduce fanout.
   if (!n->jump && n->brother) {if (level<1) return(1); level--;}
   // Convert list of siblings to array to simplify loop.
   int i;
@@ -646,6 +667,11 @@ int fullexpand(node *f, int level) {
   // Recursively expand all children of this node, extracting and re-inserting
   // each of the expanded nodes to make sibling order reflect the updated
   // scores.
+  // Return Note: Zero return from recursive call indicates either abort or
+  // max node/evaluation threshold reached. In either case, we don't even
+  // process the remaining sons at a given level.
+  // Rationale: For deeply nested levels, there could be *lots* of sons
+  // remaining to be processed when threshold is reached.
   for (i=0; ret && (n = sons[i++]);) {
     // Make move (temporarily), to be restored after recursive expansion.
     // Optimization Note: This is rather inefficient: the memmove() copies
