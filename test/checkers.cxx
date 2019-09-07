@@ -589,17 +589,19 @@ void newgame(void) {
   playing = 1;
 }
 
-void domove(node* move) {
+void domove(node* move, bool nokill = false) {
   if (move->jump) memmove(jumpboards[nextjump++],b,sizeof(b));
   makemove(move);
-  extract(move);
-  killnode(root->son);
-  root->son = move;
+  if (!nokill) {
+    extract(move);
+    killnode(root->son);
+    root->son = move;
+  }
   root = move;
   if (debug) evaluateboard(move,1);
 }
 
-node* undomove() {
+node* undomove(bool nokill = false) {
   node *n = root;
   if (n == undoroot) return 0; // no more undo possible
   if (n->jump) memmove(b,jumpboards[--nextjump],sizeof(b));
@@ -609,9 +611,11 @@ node* undomove() {
     b[n->to] = EMPTY;
   }
   root = n->father;
-  killnode(n);
-  root->son = 0;
-  root->value = 0;	// prevent it from thinking game is over
+  if (!nokill) {
+    killnode(n);
+    root->son = 0;
+    root->value = 0;	// prevent it from thinking game is over
+  }
   playing = 1;
   if (root == undoroot) user = 0;
   return n;
@@ -900,7 +904,7 @@ void draw_piece(int which, int x, int y) {
 
 class Board;
 class Next;
-class Stepmode {
+class Expmode {
   public:
   struct Move {
     friend bool operator!=(const Move &move, const node &node);
@@ -921,19 +925,19 @@ class Stepmode {
   node *base;
   Next *nexts;
   public:
-  Stepmode() : board(NULL), active(false), next(NULL), base(NULL), nexts(NULL) {}
+  Expmode() : board(NULL), active(false), next(NULL), base(NULL), nexts(NULL) {}
   bool is_active() { return active; }
   bool is_next(node *n) { return n == next; }
   void activate(Board *b);
   void deactivate();
-  void forward();
-  void backward();
+  bool forward();
+  bool backward();
   void better();
   void worse();
   void resume();
   void revert();
   private:
-  void find_next();
+  bool ensure_tree();
   void push_next() {
     nexts = new Next(nexts, next->from, next->to);
   }
@@ -941,20 +945,20 @@ class Stepmode {
 };
 
 // TODO: Consider adding as member of move...
-bool operator!=(const Stepmode::Move &move, const node &node) {
+bool operator!=(const Expmode::Move &move, const node &node) {
   return move.from != node.from || move.to != node.to;
 }
-bool operator==(const Stepmode::Move &move, const node &node) {
+bool operator==(const Expmode::Move &move, const node &node) {
   return !(move != node);
 }
 
-static Stepmode stepmode;
+static Expmode expmode;
 
 class Board : public Fl_Overlay_Window {
   void draw();
   void draw_overlay();
   int handle(int);
-  int handle_stepmode(int);
+  int handle_expmode(int);
 public:
   void drag_piece(int, int, int);
   void drop_piece(int);
@@ -996,7 +1000,7 @@ void Board::draw() {
   for (int j = 5; j < 40; j++) if (j != erase_this) {
     draw_piece(b[j], squarex(j), squarey(j));
   }
-  int stepping = stepmode.is_active() ? 1 : 0;
+  int stepping = expmode.is_active() ? 1 : 0;
   if (showlegal || stepping) {
     fl_color(FL_WHITE);
     node* n;
@@ -1006,7 +1010,7 @@ void Board::draw() {
       int x2 = squarex(n->to)+BOXSIZE/2-5;
       int y2 = squarey(n->to)+BOXSIZE/2-5;
 
-      if (stepping && stepmode.is_next(n)) {
+      if (stepping && expmode.is_next(n)) {
 	fl_color(FL_GREEN);
 	fl_line_style(FL_DASHDOT, 2, NULL);
       } else {
@@ -1040,7 +1044,7 @@ void Board::draw() {
 }
 
 void Board::draw_overlay() {
-  if (stepmode.is_active()) {
+  if (expmode.is_active()) {
     fl_color(FL_BLACK);
     fl_font(FL_BOLD,24);
     fl_draw("STEP MODE!", 200, 200);
@@ -1130,26 +1134,26 @@ void Board::computer_move(int help) {
 extern Fl_Menu_Item menu[];
 extern Fl_Menu_Item busymenu[];
 
-int Board::handle_stepmode(int e) {
-  if (stepmode.is_active() && e == FL_KEYDOWN) {
+int Board::handle_expmode(int e) {
+  if (expmode.is_active() && e == FL_KEYDOWN) {
     switch (Fl::event_key()) {
       case FL_Right:
-	stepmode.forward();
+	expmode.forward();
 	break;
       case FL_Left:
-	stepmode.backward();
+	expmode.backward();
 	break;
       case FL_Up:
-	stepmode.better();
+	expmode.better();
 	break;
       case FL_Down:
-	stepmode.worse();
+	expmode.worse();
 	break;
       case FL_Escape:
-	stepmode.revert();
+	expmode.revert();
 	break;
       case FL_Enter:
-	stepmode.resume();
+	expmode.resume();
 	break;
       default:
 	return 0;
@@ -1157,13 +1161,13 @@ int Board::handle_stepmode(int e) {
     // Valid command
     return 1;
   }
-  // Not in stepmode or no keypress
+  // Not in expmode or no keypress
   return 0;
 }
 
 int Board::handle(int e) {
   // TODO: Decide how to integrate: I'm thinking no busy menu during this mode.
-  int ret = handle_stepmode(e);
+  int ret = handle_expmode(e);
   if (ret) return ret;
 
   if (busy) {
@@ -1235,80 +1239,94 @@ int Board::handle(int e) {
   }
 }
 
-void Stepmode::activate(Board *b) {
-  nexts = NULL;
+void Expmode::activate(Board *b) {
   board = b;
+  if (!ensure_tree()) {
+    fl_message("Nothing to explore\n");
+    return;
+  }
+  nexts = NULL;
   active = true;
-  // Show all legal moves.
-  showlegal = 1;
-  find_next();
   base = root;
+
+  // Make sure the move arrows are updated.
   board->redraw_overlay();
   ((Fl_Widget *)board)->redraw();
 }
-void Stepmode::deactivate() {
+
+void Expmode::deactivate() {
+  // Note: Don't NULL board member, as it may be needed after this call (and
+  // never changes anyways).
   active = false;
-  board = NULL;
   next = base = NULL;
-  showlegal = 0;
+  // Delete any remaining Next nodes (though in current approach, there
+  // shouldn't be any).
+  delete nexts;
 }
 
-void Stepmode::find_next() {
-  board->cursor(FL_CURSOR_WAIT);
-  next = calcmove(root);
-  printf("showlegal=%d\n", showlegal);
-  if (next) {
-    // FIXME!
-    if (next->value <= -30000) {
-      fl_message("%s resigns", next->who ? "White" : "Black");
+bool Expmode::ensure_tree() {
+  if (!root->son) {
+    if (root == undoroot) {
+      board->cursor(FL_CURSOR_WAIT);
+      next = calcmove(root);
+      board->cursor(FL_CURSOR_DEFAULT);
+      return true;
     }
+    // Nothing to explore.
+    return false;
   }
+  // Nominal case: start with next pointing down the son path.
+  next = root->son;
 
-  board->cursor(FL_CURSOR_DEFAULT);
-  // Make sure the move arrows are updated.
-  // FIXME: Probably have a special damage value to request this.
-  board->redraw();
+  return true;
 }
 
-void Stepmode::pop_next() {
+void Expmode::pop_next() {
   Next *rem = nexts;
-  if (rem) {
-    nexts = nexts->prev;
-    Move move(rem->move.from, rem->move.to);
-
-    // Find and select the popped move.
-    next = root->son;
-    for (; move != *next; next = next->brother) ;
-
-    delete rem;
+  if (!rem) {
+    fl_message("Can't rewind any further\n");
+    return;
   }
+  nexts = nexts->prev;
+  Move move(rem->move.from, rem->move.to);
+
+  // Find and select the popped move.
+  next = root->son;
+  for (; move != *next; next = next->brother) ;
+
+  delete rem;
 }
 
-
-void Stepmode::forward() {
+bool Expmode::forward() {
   printf("forward\n");
+  if (!next) {
+    fl_message("Can't go forward without more calculations\n");
+    return false;
+  }
   // Save this level's next on a stack list
   push_next();
   // FIXME: How fast should it be? Instantaneous?
   board->animate(next,0);
-  domove(next);
-
-  find_next();
+  domove(next, true);
+  next = root->son;
   board->redraw();
+  return true;
 }
-void Stepmode::backward() {
+
+bool Expmode::backward() {
   if (root == base) {
     // FIXME! Can't go back further than base!
     printf("Hit start!\n");
-    return;
+    return false;
   }
   printf("backward\n");
-  board->animate(undomove(),1);
-  find_next();
+  board->animate(undomove(true),1);
   pop_next();
   board->redraw();
+  return true;
 }
-void Stepmode::better() {
+
+void Expmode::better() {
   if (next != root->son) {
     printf("better move\n");
     node *stop = next;
@@ -1316,20 +1334,31 @@ void Stepmode::better() {
   }
   board->redraw();
 }
-void Stepmode::worse() {
+
+void Expmode::worse() {
   if (next->brother) {
     printf("worse move\n");
     next = next->brother;
   }
   board->redraw();
 }
-void Stepmode::resume() {
+
+void Expmode::resume() {
   printf("continue from here\n");
-  stepmode.deactivate();
+  // FIXME! Need to decide how this should work...
+  expmode.deactivate();
 }
-void Stepmode::revert() {
+
+void Expmode::revert() {
   printf("revert to point of mode entry\n");
-  stepmode.deactivate();
+  while (backward()) ;
+  for (node *n = root; n != base; board->animate(undomove(true), 1)) ;
+
+  // Deactivate before redraw to prevent drawing of arrows.
+  expmode.deactivate();
+  board->redraw_overlay();
+  ((Fl_Widget *)board)->redraw();
+  board = NULL;
 }
 
 void quit_cb(Fl_Widget*, void*) {exit(0);}
@@ -1351,15 +1380,15 @@ void autoplay_cb(Fl_Widget*bp, void*) {
   while (autoplay) {b->computer_move(0); b->computer_move(0);}
 }
 
-void stepmode_cb(Fl_Widget* bp, void *) {
+void expmode_cb(Fl_Widget* bp, void *) {
   Board* b = (Board*)bp;
 
   // Activate the mode
   // FIXME: Clean this up, perhaps with a toggle.
-  if (stepmode.is_active())
-    stepmode.deactivate();
+  if (expmode.is_active())
+    expmode.deactivate();
   else
-    stepmode.activate(b);
+    expmode.activate(b);
 
 
 }
@@ -1469,7 +1498,7 @@ void continue_cb(Fl_Widget*, void*) {}
 
 Fl_Menu_Item menu[] = {
   {"Autoplay", 'a', autoplay_cb},
-  {"Step mode", 't', stepmode_cb},
+  {"Explore move tree", 't', expmode_cb},
   {"Legal moves", 'l', legal_cb},
   {"Move for me", 'm', move_cb},
   {"New game", 'n', newgame_cb},
